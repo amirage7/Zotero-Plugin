@@ -1,8 +1,10 @@
-# Generated installers (the current release is included under dist/)
+# Generated installers (release packages live in each plugin's dist/)
 /*.xpi
+/plugins/*/*.xpi
 
 # Isolated Zotero profiles, databases, attachments, screenshots and logs
 /tests/desktop/
+/plugins/*/tests/desktop/
 __pycache__/
 *.pyc
 .DS_Store
