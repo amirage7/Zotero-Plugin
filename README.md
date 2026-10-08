@@ -6,7 +6,7 @@
 
 | 插件 | 功能 | 版本 | Zotero 兼容版本 | 下载 |
 | --- | --- | --- | --- | --- |
-| [Tag Studio · 标签工作台](plugins/tag-studio/README.md) | 标签管理、颜色、快捷勾选和 PDF 阅读侧栏 | 0.3.1 | 10.0.x | [XPI 安装包](plugins/tag-studio/dist/TagStudio-Zotero10-v0.3.1.xpi) |
+| [Tag Studio · 标签工作台](plugins/tag-studio/README.md) | 分类标签列、自适应行高、快捷勾选和 PDF 阅读侧栏 | 0.3.5 | 10.0.x | [XPI 安装包](plugins/tag-studio/dist/TagStudio-Zotero10-v0.3.5.xpi) |
 
 后续插件会继续加入此目录，各插件的兼容版本和使用方法以自己的 README 为准。
 
@@ -50,6 +50,7 @@ node tests/manifest.cjs
 node tests/smoke.cjs
 node tests/quick.cjs
 node tests/zotero10.cjs
+node tests/list-mode.cjs
 ```
 
 实际 Zotero 安装测试步骤见 [Tag Studio 测试说明](plugins/tag-studio/tests/README.md)。
