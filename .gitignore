@@ -1,0 +1,9 @@
+# Generated installers (the current release is included under dist/)
+/*.xpi
+
+# Isolated Zotero profiles, databases, attachments, screenshots and logs
+/tests/desktop/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
