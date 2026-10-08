@@ -1,0 +1,25 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const path = require('node:path');
+const ctx = vm.createContext({});
+vm.runInContext(fs.readFileSync(path.join(__dirname, '../quick-tags.js'), 'utf8'), ctx);
+const a = {libraryID:1, tags:['#a'], hasTag(t){return this.tags.includes(t)}, addTag(t){this.tags.push(t)}, removeTag(t){this.tags=this.tags.filter(x=>x!==t)}, async save(){}};
+const b = {...a,tags:[]};
+const Zotero = {DB:{executeTransaction:async fn=>fn()}, Libraries:{get:()=>({editable:true})}};
+const quick = ctx.TagStudioQuick.create({Zotero, Services:{}, pluginID:'test', refreshColumn(){}, loadNames:async()=>[], commonNames:()=>[], colorFor:()=>'',foreground:()=>'',labelFor:t=>t,open(){}, selection:()=>[],resolveLibraryContext:()=>({libraryID:1})});
+(async()=>{
+  assert.equal(quick.tagState([a,b],'#a'),'mixed');
+  assert.equal(quick.stateLabel([a,b],'#a'),'▣ #a（部分已添加）');
+  assert.equal(quick.stateLabel([a],'#a'),'☑ #a');
+  assert.equal(quick.stateLabel([b],'#a'),'☐ #a');
+  await quick.toggle([a,b], '#a');
+  assert.equal(quick.tagState([a,b],'#a'),'all');
+  await quick.toggle([a,b], '#a');
+  assert.equal(quick.tagState([a,b],'#a'),'none');
+  assert.equal(quick.tagState([],'#a'),'none');
+  Zotero.Libraries.get=()=>({editable:false});
+  await assert.rejects(()=>quick.toggle([a], '#a'), /只读/);
+  assert.equal(a.tags.length,0);
+  console.log('PASS: mixed tag toggle, add/remove, empty selection and read-only guard');
+})().catch(e=>{console.error(e);process.exitCode=1});
