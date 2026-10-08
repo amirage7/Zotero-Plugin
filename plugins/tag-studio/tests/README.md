@@ -9,6 +9,7 @@ node tests/manifest.cjs
 node tests/smoke.cjs
 node tests/quick.cjs
 node tests/zotero10.cjs
+node tests/list-mode.cjs
 ```
 
 ## 生成安装包
@@ -20,7 +21,12 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
 生成的 XPI 位于插件目录，版本号读取自 manifest.json。
-插件的 dist/ 目录提供当前 v0.3.1 的可安装包。
+插件的 dist/ 目录提供当前 v0.3.5 的可安装包。
+
+`node tests/list-mode.cjs` 验证逐篇自适应行高、短标签与空行、调整列宽、顶部行保持、模式保存和禁用恢复。
+`node tests/overflow-ui.cjs` 使用 Playwright 与本地 Edge 验证延迟插入的单元格、一行/两行排版、剩余数量和调整列宽。可通过 `TAGSTUDIO_PLAYWRIGHT` 指定 Playwright 模块路径。
+实际 Zotero 测试还检查两行标签没有裁切、真实行高与虚拟滚动行高一致，以及重新打开工作台后的模式记忆。
+`node tests/grouped-ui.cjs` 同样使用 Playwright 与本地 Edge，验证工作台分类分区、修改分类后立即移动和搜索过滤。
 
 ## 实际 Zotero 安装测试
 
@@ -28,7 +34,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 
 ```powershell
 $testProfile = python tests/setup-desktop.py
-Start-Process 'C:\Program Files\Zotero\zotero.exe' -ArgumentList '-no-remote','-headless','-profile',('"' + $testProfile.Trim() + '"') -WindowStyle Hidden
+Start-Process 'C:\Program Files\Zotero\zotero.exe' -ArgumentList @('-no-remote','-profile',('"' + $testProfile.Trim() + '"')) -WindowStyle Hidden
 ```
 
 若 Zotero 安装在其他目录，请修改可执行文件路径。
