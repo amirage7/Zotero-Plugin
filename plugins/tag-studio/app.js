@@ -7,13 +7,160 @@ var TagStudio = (() => {
   const GROUPS = ["研究主题", "研究对象", "研究方法", "阅读进度", "其他"];
   const windows = new Set();
   const overlayClosers = new Map();
-  let columnID = null;
+  const columnIDs = [];
   let palette = readJSON("colors", {});
   let categories = readJSON("categories", {});
   let customCatalog = readJSON("catalog", {});
   let onlyHashtag = readSetting("onlyHashtag", true);
   let favorites = readJSON("favorites", {});
   let quick = null;
+  let listMode = readSetting("listMode", "compact") === "comfortable" ? "comfortable" : "compact";
+  const listWindows = new Map();
+  const cellObservers = new Map();
+  const connectedCells = new WeakSet();
+  const measuredColumns = new WeakMap();
+
+  function fitTagCell(cell, chips, more, doc, label) {
+    const layout = () => {
+      const computed = doc.defaultView.getComputedStyle(cell);
+      const width = cell.clientWidth - (parseFloat(computed.paddingLeft) || 0) - (parseFloat(computed.paddingRight) || 0);
+      if (!width) return;
+      const lines = listMode === "comfortable" ? 2 : 1;
+      chips.forEach(chip => {chip.style.display = "inline-block";});
+      const widths = chips.map(chip => chip.getBoundingClientRect().width);
+      let measured = measuredColumns.get(doc);
+      if (!measured) {measured = new Map();measuredColumns.set(doc, measured);}
+      const outerWidth = cell.getBoundingClientRect().width;
+      measured.set(label, {width, outerWidth, font: `11px ${computed.fontFamily}`});
+      function fits(values) {
+        let row = 1, used = 0;
+        for (const value of values) {
+          if (used && used + 5 + value > width + 0.5) {row++;used = 0;}
+          used += (used ? 5 : 0) + value;
+          if (row > lines || value > width + 0.5) return false;
+        }
+        return true;
+      }
+      let visible = chips.length;
+      more.style.display = "none";
+      if (!fits(widths)) {
+        more.style.display = "inline-block";
+        do {
+          visible--;
+          more.textContent = "+" + (chips.length - visible);
+        } while (visible > 0 && !fits([...widths.slice(0, visible),more.getBoundingClientRect().width]));
+      }
+      chips.forEach((chip,index) => {chip.style.display = index < visible ? "inline-block" : "none";});
+      more.setAttribute?.("aria-label", `还有 ${chips.length - visible} 个标签：${cell.title}`);
+      cell.style.height = listMode === "comfortable" && widths.reduce((sum,value)=>sum+value,0)+Math.max(0,widths.length-1)*5 > width+0.5 ? "45px" : "21px";
+      cell.style.visibility = "visible";
+      for (const [win, record] of listWindows) {
+        if (win.document === doc && record.tree && !record.pending) {
+          record.pending = win.setTimeout(() => {record.pending = null;syncListWindow(win);}, 30);
+        }
+      }
+    };
+    const view = doc.defaultView;
+    if (view?.ResizeObserver) {
+      let observer = cellObservers.get(doc);
+      if (!observer) {
+        observer = new view.ResizeObserver(entries => {
+          for (const {target} of entries) {
+            if (!target.isConnected) {
+              if (connectedCells.has(target)) observer.unobserve(target);
+            } else {
+              connectedCells.add(target);
+              target._tagStudioLayout?.();
+            }
+          }
+        });
+        cellObservers.set(doc, observer);
+      }
+      cell._tagStudioLayout = layout;
+      observer.observe(cell);
+    }
+    view?.requestAnimationFrame(layout);
+  }
+
+  function applyRowHeights(tree, heights) {
+    const list = tree._jsWindow;
+    const first = list?.getFirstVisibleRow?.() || 0;
+    const offset = list ? list.scrollOffset - list._getItemPosition(first) : 0;
+    tree.updateCustomRowHeights(heights);
+    // Recompute the total height after Zotero updates its row offsets.
+    list?.update();
+    if (list) list.scrollTo(list._getItemPosition(first) + offset);
+    list?.invalidate();
+  }
+  function adaptiveRows(win, tree, originals) {
+    const view = win.ZoteroPane.itemsView;
+    const columns = (tree._columns?.getAsArray() || []).filter(c=>!c.hidden && columnIDs.includes(c.dataKey));
+    const canvas = win.document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    const measured = measuredColumns.get(win.document);
+    const widths = columns.map(column => {
+      const size = parseFloat(column.width) || 120;
+      const actual = measured?.get(column.label);
+      return {group: GROUPS.includes(column.label) ? column.label : null,
+        width: actual && Math.abs(actual.outerWidth-size)<2 ? actual.width : Math.max(1,size-8),
+        font: actual?.font || "11px system-ui"};
+    });
+    const result = new Map(originals);
+    for (let index=0; index<view.getRowCount(); index++) {
+      const item = view.getRow(index)?.ref;
+      if (!item?.getTags) continue;
+      let tags = item.getTags().map(t=>t.tag).filter(Boolean);
+      if (onlyHashtag) tags=tags.filter(t=>t.startsWith("#"));
+      const needsTwo = widths.some(column=>{
+        context.font = column.font;
+        const names = tags.filter(tag=>!column.group || groupFor(tag)===column.group);
+        const total = names.reduce((sum,tag)=>sum+Math.min(175,column.width,context.measureText(labelFor(tag)).width+12),0)+Math.max(0,names.length-1)*5;
+        return total>column.width+0.5;
+      });
+      if (needsTwo) result.set(index,Math.max(result.get(index)||0,52,tree._rowHeight*2));
+    }
+    return [...result].sort((a,b)=>a[0]-b[0]);
+  }
+  function restoreTree(record) {
+    if (!record.tree) return;
+    const tree = record.tree;
+    // Do not remove a later override installed by another plugin.
+    if (tree._getWindowedListOptions === record.wrapper) {
+      if (record.own) tree._getWindowedListOptions = record.original;
+      else delete tree._getWindowedListOptions;
+    }
+    applyRowHeights(tree, record.original.call(tree).customRowHeights || []);
+    record.tree = null;
+    record.signature = null;
+  }
+  function syncListWindow(win) {
+    const record = listWindows.get(win);
+    if (!record) return;
+    const tree = win.ZoteroPane?.itemsView?.tree;
+    if (record.tree && (record.tree !== tree || listMode !== "comfortable")) restoreTree(record);
+    if (listMode !== "comfortable" || !tree?._getWindowedListOptions || !tree.updateCustomRowHeights) return;
+    if (record.tree !== tree) {
+      record.tree = tree;
+      record.own = Object.prototype.hasOwnProperty.call(tree,"_getWindowedListOptions");
+      record.original = tree._getWindowedListOptions;
+      record.wrapper = function () {
+        const options = record.original.call(this);
+        const heights = listMode === "comfortable" ? adaptiveRows(win,this,options.customRowHeights || []) : options.customRowHeights || [];
+        this._customRowHeightMap = Object.fromEntries(heights);
+        return {...options,customRowHeights:heights};
+      };
+      tree._getWindowedListOptions = record.wrapper;
+    }
+    const heights = adaptiveRows(win,tree,record.original.call(tree).customRowHeights || []);
+    const signature = JSON.stringify(heights);
+    if (record.signature !== signature) {record.signature=signature;applyRowHeights(tree,heights);}
+  }
+  function setListMode(value) {
+    listMode = value === "comfortable" ? value : "compact";
+    store("listMode", listMode);
+    for (const win of windows) syncListWindow(win);
+    refreshColumn();
+  }
 
   function commonNames(names, libraryID) {
     const pinned = favorites[String(libraryID)] || [];
@@ -114,38 +261,61 @@ var TagStudio = (() => {
   }
 
   async function start() {
-    columnID = await Zotero.ItemTreeManager.registerColumn({
-      dataKey: "tagStudioTags", label: "彩色标签", pluginID,
-      enabledTreeIDs: ["main"], width: "340", minWidth: 120,
-      flex: 0, showInColumnPicker: true,
+    const definitions = GROUPS.map((group, index) => ({
+      dataKey: ["tagStudioTopic", "tagStudioObject", "tagStudioMethod", "tagStudioReading", "tagStudioOther"][index],
+      label: group, group, hidden: index > 2, width: index === 0 ? "160" : "120",
+    }));
+    definitions.push({dataKey: "tagStudioTags", label: "彩色标签", hidden: true, width: "340"});
+    for (const definition of definitions) {
+    const id = await Zotero.ItemTreeManager.registerColumn({
+      dataKey: definition.dataKey, label: definition.label, pluginID,
+      hidden: definition.hidden,
+      enabledTreeIDs: ["main"], width: definition.width, minWidth: 80,
+      flex: 0, staticWidth: true, showInColumnPicker: true,
       zoteroPersist: ["width", "hidden"],
       dataProvider(item) {
         try {
           let names = (item.getTags() || []).map(t => t.tag).filter(Boolean);
           if (onlyHashtag) names = names.filter(n => n.startsWith("#"));
+          if (definition.group) names = names.filter(n => groupFor(n) === definition.group);
           return JSON.stringify(names);
         } catch (_) { return "[]"; }
       },
       renderCell(index, data, column, isFirstColumn, doc) {
         const cell = doc.createElement("span");
         cell.className = `cell ${column.className}`;
-        cell.style.cssText = "display:flex;gap:5px;align-items:center;overflow:hidden;white-space:nowrap;min-width:0;";
+        cell.style.cssText = `display:flex;flex-wrap:wrap;gap:3px 5px;align-content:center;align-items:center;overflow:hidden;white-space:nowrap;min-width:0;height:${listMode === "comfortable" ? 45 : 21}px;`;
+        if (doc.defaultView) cell.style.visibility = "hidden";
         try {
           const tags = JSON.parse(data || "[]");
+          cell.title = tags.join("、");
+          const chips = [];
           for (const tag of tags) {
             const chip = doc.createElement("span");
             const color = colorFor(tag);
             chip.textContent = labelFor(tag);
             chip.title = tag;
-            chip.style.cssText = "display:inline-block;flex:0 0 auto;padding:2px 6px;border-radius:4px;font-size:11px;line-height:17px;max-width:175px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+            chip.style.cssText = "display:inline-block;box-sizing:border-box;flex:0 0 auto;padding:2px 6px;border-radius:4px;font-size:11px;line-height:17px;max-width:min(175px,100%);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
             chip.style.backgroundColor = color;
             chip.style.color = foreground(color);
             cell.appendChild(chip);
+            chips.push(chip);
+          }
+          if (doc.defaultView) {
+            const more = doc.createElement("span");
+            more.className = "tagstudio-more";
+            more.title = cell.title;
+            more.style.cssText = "display:none;flex:0 0 auto;padding:2px 5px;border-radius:4px;font-size:11px;line-height:17px;background:var(--material-background,#edf0f5);color:var(--fill-primary,#263044);";
+            cell.appendChild(more);
+            fitTagCell(cell, chips, more, doc, definition.label);
           }
         } catch (_) {}
         return cell;
       },
     });
+    if (!id) throw new Error("无法注册标签列：" + definition.label);
+    columnIDs.push(id);
+    }
     if (typeof TagStudioQuick !== 'undefined') {
       quick = TagStudioQuick.create({Zotero, Services, pluginID, rootURI, html, loadNames, commonNames, colorFor, foreground, labelFor, usableItem, open, selection, resolveLibraryContext, refreshColumn});
       quick.start();
@@ -154,14 +324,19 @@ var TagStudio = (() => {
   async function stop() {
     quick?.stop();
     for (const win of [...windows]) unmount(win);
-    if (columnID !== null) {
-      try { await Zotero.ItemTreeManager.unregisterColumn(columnID); } catch (e) { Zotero.logError(e); }
-      columnID = null;
-    }
+    for (const observer of cellObservers.values()) observer.disconnect();
+    cellObservers.clear();
+    await Promise.all(columnIDs.splice(0).map(async id => {
+      try { await Zotero.ItemTreeManager.unregisterColumn(id); } catch (e) { Zotero.logError(e); }
+    }));
   }
   function mount(win) {
     if (!win || windows.has(win)) return;
     windows.add(win);
+    const record = {tree:null};
+    listWindows.set(win, record);
+    syncListWindow(win);
+    record.timer = win.setInterval?.(() => syncListWindow(win), 500);
     const d = win.document;
     const toolsMenu = d.querySelector("#menu_ToolsPopup");
     if (toolsMenu) {
@@ -180,6 +355,10 @@ var TagStudio = (() => {
     d.getElementById("tagstudio-tools-menu")?.remove();
     d.getElementById("tagstudio-item-menu")?.remove();
     overlayClosers.get(win)?.();
+    const record = listWindows.get(win);
+    if (record) {win.clearInterval?.(record.timer);win.clearTimeout?.(record.pending);restoreTree(record);listWindows.delete(win);}
+    const observer = cellObservers.get(d);
+    if (observer) {observer.disconnect();cellObservers.delete(d);}
     windows.delete(win);
   }
 
@@ -256,6 +435,11 @@ var TagStudio = (() => {
 #tagstudio-root .ts-footer {gap:12px;flex-wrap:wrap;padding:12px 22px;background:#fafbfd}
 #tagstudio-root .ts-footer .ts-tip {max-width:420px}
 #tagstudio-root .ts-empty {width:100%;grid-column:1/-1;padding:30px 10px}
+#tagstudio-root .ts-tag-group {margin:0 0 22px;min-width:0}
+#tagstudio-root .ts-tag-group:last-child {margin-bottom:0}
+#tagstudio-root .ts-group-heading {display:flex;align-items:center;gap:10px;margin:0 0 10px;padding:0 0 8px;border-bottom:1px solid #e1e6ee}
+#tagstudio-root .ts-group-heading h3 {margin:0;font-size:14px;font-weight:650;line-height:22px;color:#263044}
+#tagstudio-root .ts-group-count {font-size:12px;color:#586577}
 @media(max-width:680px){#tagstudio-root .ts-panel {width:96vw;height:94vh}#tagstudio-root .ts-header,#tagstudio-root .ts-tools,#tagstudio-root .ts-tabs,#tagstudio-root .ts-footer {padding-left:14px;padding-right:14px}#tagstudio-root .ts-body,#tagstudio-root .ts-selected-area {padding-left:14px;padding-right:14px}#tagstudio-root #ts-search {min-width:160px}#tagstudio-root .ts-manage-grid {grid-template-columns:1fr}}
 `;
 
@@ -281,9 +465,15 @@ var TagStudio = (() => {
     heading.appendChild(html(d, "div", {className: "ts-muted"}, `${state.names.length} 个标签 · ${state.items.length} 篇选中论文`));
     const x = html(d, "button", {className: "ts-x", title:"关闭标签工作台"}, "×"); header.appendChild(x);
     const tabs = html(d, "div", {className: "ts-tabs"}); panel.appendChild(tabs);
+    const modeLabel = html(d,"label",{style:"margin-left:auto;display:flex;align-items:center;gap:7px;font-size:12px;white-space:nowrap;"},"列表显示");
+    const modeSelect = html(d,"select",{"aria-label":"列表显示模式",style:"width:126px;"});
+    modeSelect.append(html(d,"option",{value:"compact"},"紧凑 · 一行"),html(d,"option",{value:"comfortable"},"宽松 · 自适应"));
+    modeSelect.value = listMode;
+    modeLabel.appendChild(modeSelect);
+    modeSelect.addEventListener("change",()=>{setListMode(modeSelect.value);setStatus(modeSelect.value === "comfortable" ? "已切换自适应：需要时两行，其余保持一行" : "已切换紧凑模式：标签一行");});
     const applyTab = html(d, "button", {className:"ts-tab", type:"button"}, "快速打标签");
     const manageTab = html(d, "button", {className:"ts-tab", type:"button"}, "标签库与颜色管理");
-    tabs.append(applyTab, manageTab);
+    tabs.append(applyTab, manageTab, modeLabel);
     const tools = html(d, "div", {className: "ts-tools"}); panel.appendChild(tools);
     const search = html(d, "input", {id:"ts-search", type:"search", placeholder:"搜索标签名称（支持中英文）"}); tools.appendChild(search);
     const tagFilter = html(d, "label", {style:"display:flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer;"});
@@ -377,7 +567,7 @@ var TagStudio = (() => {
         const controls=html(d,'div',{className:'ts-card-controls'});r.appendChild(controls);
         const cat = html(d, "select", {title:"标签分类"});
         for (const g of GROUPS) { const opt = html(d,"option",{value:g},g); if (g === groupFor(tag)) opt.selected=true; cat.appendChild(opt); }
-        cat.addEventListener("change", () => { categories[tag] = cat.value; saveConfigs(); setStatus("分类已保存"); });
+        cat.addEventListener("change", () => { categories[tag] = cat.value; saveConfigs(); renderList(); refreshColumn(); setStatus("分类已保存；标签已移到对应列"); });
         controls.appendChild(cat);
         const color = html(d, "input", {type:"color", className:"ts-color", title:`修改 ${tag} 的颜色`});
         color.value = colorFor(tag);
@@ -420,16 +610,21 @@ var TagStudio = (() => {
     function renderList() {
       const previousScroll = body.scrollTop;
       body.replaceChildren();
-      body.classList.toggle('ts-manage-grid',state.tab==='manage');
-      body.classList.toggle('ts-apply-grid',state.tab==='apply');
       const names = filterNames();
       if (!names.length) body.appendChild(html(d,"div",{className:"ts-empty"},"没有匹配的标签，可在上方输入名称并创建。"));
       else {
-        // Grouping is for management only; keep assignment a flat searchable list.
-        const sorted = state.tab === "manage"
-          ? [...names].sort((a,b) => GROUPS.indexOf(groupFor(a))-GROUPS.indexOf(groupFor(b)) || a.localeCompare(b,"zh-CN"))
-          : names;
-        for (const name of sorted) body.appendChild(row(name));
+        for (const group of GROUPS) {
+          const members=names.filter(name=>groupFor(name)===group).sort((a,b)=>a.localeCompare(b,'zh-CN'));
+          if(!members.length)continue;
+          const section=html(d,'section',{className:'ts-tag-group','data-group':group,'aria-label':group});
+          const header=html(d,'div',{className:'ts-group-heading'});
+          header.appendChild(html(d,'h3',{},group));
+          header.appendChild(html(d,'span',{className:'ts-group-count'},`${members.length} 个标签`));
+          section.appendChild(header);
+          const grid=html(d,'div',{className:state.tab==='manage'?'ts-manage-grid':'ts-apply-grid'});
+          for(const name of members)grid.appendChild(row(name));
+          section.appendChild(grid);body.appendChild(section);
+        }
       }
       body.scrollTop = previousScroll;
       renderSelected();
@@ -483,5 +678,5 @@ var TagStudio = (() => {
     switchTab(state.tab);
   }
 
-  return {start, stop, mount, unmount, open};
+  return {start, stop, mount, unmount, open, setListMode};
 })();
